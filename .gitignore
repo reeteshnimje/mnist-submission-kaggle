@@ -1,0 +1,7 @@
+venv/
+.env/
+digit-recognizer
+best_model.pth
+submission.csv
+submission-bignet.csv
+.idea/
