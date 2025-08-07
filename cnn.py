@@ -6,15 +6,16 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader, Dataset, Subset
 from torchvision import transforms
+from sklearn.model_selection import KFold
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
 class DigitRecognizerDataset(Dataset):
-    def __init__(self, csv_file, transform=None, train=True):
-        self.data = pd.read_csv(csv_file)
+    def __init__(self, dataframe, transform=None, train=True):
+        self.data = dataframe
         self.transform = transform
         self.train = train
 
@@ -54,12 +55,6 @@ test_transform = transforms.Compose([
     transforms.Normalize((0.5,), (0.5,))
 ])
 
-train_dataset = DigitRecognizerDataset('digit-recognizer/train.csv', transform=train_transform, train=True)
-test_dataset = DigitRecognizerDataset('digit-recognizer/test.csv', transform=test_transform, train=False)
-
-train_loader = DataLoader(train_dataset, batch_size=64, shuffle=True)
-test_loader = DataLoader(test_dataset, batch_size=64, shuffle=False)
-
 
 class SimpleCNN(nn.Module):
     def __init__(self, num_classes=10):
@@ -81,49 +76,64 @@ class SimpleCNN(nn.Module):
         return x
 
 
-model = SimpleCNN().to(device)
-criterion = nn.CrossEntropyLoss()
-optimizer = optim.Adam(model.parameters(), lr=0.001)
+# Load full train/test data once
+full_train_df = pd.read_csv('digit-recognizer/train.csv')
+test_df = pd.read_csv('digit-recognizer/test.csv')
 
+test_dataset = DigitRecognizerDataset(test_df, transform=test_transform, train=False)
+test_loader = DataLoader(test_dataset, batch_size=64, shuffle=False)
 
-def train_model(epochs=50):
-    model.train()
-    for epoch in range(epochs):
-        running_loss = 0.0
-        for i, (images, labels) in enumerate(train_loader):
+kfold = KFold(n_splits=5, shuffle=True, random_state=42)
+best_model = None
+best_accuracy = 0.0
+
+for fold, (train_idx, val_idx) in enumerate(kfold.split(full_train_df)):
+    print(f"\n--- Fold {fold + 1} ---")
+
+    train_df = full_train_df.iloc[train_idx].reset_index(drop=True)
+    val_df = full_train_df.iloc[val_idx].reset_index(drop=True)
+
+    train_dataset = DigitRecognizerDataset(train_df, transform=train_transform, train=True)
+    val_dataset = DigitRecognizerDataset(val_df, transform=test_transform, train=True)
+
+    train_loader = DataLoader(train_dataset, batch_size=64, shuffle=True)
+    val_loader = DataLoader(val_dataset, batch_size=64, shuffle=False)
+
+    model = SimpleCNN().to(device)
+    criterion = nn.CrossEntropyLoss()
+    optimizer = optim.Adam(model.parameters(), lr=0.001)
+
+    # Train
+    for epoch in range(10):
+        model.train()
+        for images, labels in train_loader:
             images, labels = images.to(device), labels.to(device)
-
             optimizer.zero_grad()
             outputs = model(images)
             loss = criterion(outputs, labels)
             loss.backward()
             optimizer.step()
 
-            running_loss += loss.item()
-            if i % 200 == 199:
-                print(f"[Epoch {epoch + 1}, Batch {i + 1}] Loss: {running_loss / 200:.3f}")
-                running_loss = 0.0
-
-
-def evaluate_model():
+    # Validate
     model.eval()
     correct = 0
     total = 0
     with torch.no_grad():
-        for images, labels in train_loader:
+        for images, labels in val_loader:
             images, labels = images.to(device), labels.to(device)
             outputs = model(images)
             _, predicted = torch.max(outputs.data, 1)
             total += labels.size(0)
             correct += (predicted == labels).sum().item()
-    print(f"Validation Accuracy: {100 * correct / total:.2f}%")
+    accuracy = 100 * correct / total
+    print(f"Validation Accuracy: {accuracy:.2f}%")
 
+    if accuracy > best_accuracy:
+        best_accuracy = accuracy
+        best_model = model  # Save model for final test prediction
 
-train_model(epochs=10)
-evaluate_model()
-
-
-def predict_test():
+# Final test prediction using best model
+def predict_test(model):
     model.eval()
     predictions = []
     with torch.no_grad():
@@ -138,7 +148,6 @@ def predict_test():
         'Label': predictions
     })
     submission.to_csv('submission-cnn.csv', index=False)
-    print("Predictions saved to submission-cnn.csv")
+    print("\nPredictions saved to submission-cnn.csv")
 
-
-predict_test()
+predict_test(best_model)
